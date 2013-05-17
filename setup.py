@@ -18,5 +18,8 @@ setup(
     author_email='peter.prettenhofer@gmail.com',
     url="http://code.google.com/p/pyrsvd/",
     scripts = ["rsvd_train","rsvd_predict","rsvd_lc"],
+    install_requires = [
+        'numpy',
+        ],
     packages=['rsvd'],
 )
