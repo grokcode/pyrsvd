@@ -1,0 +1,25 @@
+pyrsvd
+------
+
+A regularized singular value decomposition solver for collaborative filtering written in python. 
+
+For further information see http://code.google.com/p/pyrsvd/. 
+
+Installation
+------------
+
+For system wide installation use::
+
+  $ python setup.py install
+
+If you want to build the extension in place use::
+
+  $ python setup.py build_ext -i
+
+and don't forget to add the pyrsvd directory to your PYTHONPATH::
+
+  $ export PYTHONPATH=$PYTHONPATH:path/to/pyrsvd
+
+
+For bug reporting, please mail to:
+<peter.prettenhofer@gmail.com>
