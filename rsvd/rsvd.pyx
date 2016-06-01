@@ -361,6 +361,9 @@ cdef double train(Rating *ratings, \
     cdef int movie=0
     cdef Rating r
     cdef double uTemp=0.0,vTemp=0.0,err=0.0,sumSqErr=0.0
+    """
+        
+    """
     for i from 0<=i<n:
         r=ratings[i]
         user=r.userID
