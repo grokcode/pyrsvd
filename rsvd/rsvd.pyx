@@ -202,10 +202,13 @@ class RSVD(object):
 
         """
 
-        model=RSVD()
+        model=RSVD() # make the instance of RSVD
+        # set the num_movies, num_users that is the first and the second of dims
         model.num_movies,model.num_users=dims
+
         model.factors=factors
         model.lr=learnRate
+        # reg is boolean value that shows the usage of regularization
         model.reg=regularization
         model.min_improvement=minImprovement
         model.max_epochs=maxEpochs
@@ -218,23 +221,27 @@ class RSVD(object):
         model.min_rating=ratingsArray['f2'].min()
         model.max_rating=ratingsArray['f2'].max()
 
+        # initial value -- CONFIRM: is it suitable?
         initVal=np.sqrt(avgRating/factors)
 
         rs=np.random.RandomState()
         
         # define the movie factors U
+        # initilize by uniformally random variables
         model.u=rs.uniform(\
             -randomNoise,randomNoise, model.num_movies*model.factors)\
             .reshape(model.num_movies,model.factors)+initVal
         
         # define the user factors V
+        # initilize by uniformally random variables
         model.v=rs.uniform(\
             -randomNoise,randomNoise, model.num_users*model.factors)\
             .reshape(model.num_users,model.factors)+initVal
-
-                
+        # finish the initialization by this line
+        # start to training
         __trainModel(model,ratingsArray,probeArray,randomize=randomize)
         return model
+
 
 def __trainModel(model,ratingsArray,probeArray,randomize=False):
     """Trains the model on the given rating data.
@@ -265,6 +272,7 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     * Shuffling may take a while.
     
     """
+    # redefine the parameters by the efficient representation on cython
     cdef object[Rating] ratings=ratingsArray
     early_stopping=False
     cdef object[Rating] probeRatings=probeArray
@@ -307,6 +315,8 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     print("----------------------------------------")
     print("epoche\ttrain err\tprobe err\telapsed time")
     sys.stdout.flush()
+    # This line is based on the old style of cython and pyrex
+    # 'epoch' is the parameter representing the times svd ran
     for epoch from 0 <= epoch < max_epochs:
         t1=time()
         if randomize and epoch%10==0:
@@ -314,6 +324,8 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
             sys.stdout.flush()
             np.random.shuffle(ratings)
             print("done")
+
+        # Calculate the dataU and dataV on this epoch
         trainErr=train(<Rating *>&(ratings[0]), dataU, \
                             dataV, K,n, reg,lr)
 
@@ -355,16 +367,17 @@ cdef double train(Rating *ratings, \
     Iterate through the rating array: for each rating compute
     the gradient with respect to the current parameters
     and update the movie and user factors, resp. 
+        factors: K, the number of dimension of the u and v factors
+
     """
     cdef int k=0,i=0,uOffset=0,vOffset=0
     cdef int user=0
     cdef int movie=0
     cdef Rating r
     cdef double uTemp=0.0,vTemp=0.0,err=0.0,sumSqErr=0.0
-    """
-        
-    """
+
     for i from 0<=i<n:
+        # calculate the error
         r=ratings[i]
         user=r.userID
         movie=r.movieID-1
@@ -373,6 +386,8 @@ cdef double train(Rating *ratings, \
         err=<double>r.rating - \
             predict(uOffset,vOffset, dataU, dataV, factors)
         sumSqErr+=err*err;
+
+        # calculate the new U and V
         for k from 0<=k<factors:
             uTemp = dataU[uOffset+k]
             vTemp = dataV[vOffset+k]
