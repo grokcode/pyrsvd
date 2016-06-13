@@ -144,7 +144,7 @@ class RSVD(object):
     def train(cls,factors,ratingsArray,dims,probeArray=None,\
                   maxEpochs=100,minImprovement=0.000001,\
                   learnRate=0.001,regularization=0.011,\
-                  randomize=False, randomNoise=0.005):
+                  randomize=False, randomNoise=0.005, nmfflag=False):
         """Factorizes the given partial rating matrix.
 
         train(factors,ratingsArray,dims,**kargs) -> RSVD
@@ -188,6 +188,8 @@ class RSVD(object):
             It penalizes the magnitude of the parameters. (0.011)
         randomize : {True,False}
             Whether or not the ratingArray should be shuffeled. (False)
+        nmfflag : {True, False}
+            Whether or not the factors should be non-negative.
 
         Returns
         -------
@@ -291,6 +293,9 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     cdef np.double_t reg=model.reg
     cdef double probeErr=0.0, oldProbeErr=0.0
     cdef double min_improvement = model.min_improvement
+    cdef char nflag = 0
+    if nmfflag:
+        nflag = 1
     
     cdef np.ndarray U=model.u   
     cdef np.ndarray V=model.v
@@ -327,7 +332,7 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
 
         # Calculate the dataU and dataV on this epoch
         trainErr=train(<Rating *>&(ratings[0]), dataU, \
-                            dataV, K,n, reg,lr)
+                            dataV, K,n, reg, lr, nflag)
 
         if early_stopping:
             probeErr=probe(<Rating *>&(probeRatings[0]),dataU, \
@@ -359,9 +364,9 @@ cdef double predict(int uOffset,int vOffset, \
         pred+=dataU[uOffset+k] * dataV[vOffset+k]
     return pred
 
-cdef double train(Rating *ratings, \
+ cdef double train(Rating *ratings, \
                             double *dataU, double *dataV, \
-                            int factors, int n, double reg,double lr):
+                            int factors, int n, double reg,double lr, nflag):
     """The inner loop of the factorization procedure.
 
     Iterate through the rating array: for each rating compute
@@ -391,9 +396,13 @@ cdef double train(Rating *ratings, \
         for k from 0<=k<factors:
             uTemp = dataU[uOffset+k]
             vTemp = dataV[vOffset+k]
-            dataU[uOffset+k]+=lr*(err*vTemp-reg*uTemp)
-            dataV[vOffset+k]+=lr*(err*uTemp-reg*vTemp)
-    return np.sqrt(sumSqErr/n)
+            if nflag:
+                dataU[uOffset+k] = max(0, dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp))
+                dataV[vOffset+k] = max(0, dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp))
+            else:
+                dataU[uOffset+k] += dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp)
+                dataV[vOffset+k] += dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp)
+    return np.sqrt(sumSqErr/n) 
 
 cdef double probe(Rating *probeRatings, double *dataU, \
                       double *dataV, int factors, int numRatings):
