@@ -210,6 +210,7 @@ class RSVD(object):
 
         model.factors=factors
         model.lr=learnRate
+        model.nmfflag = nmfflag
         # reg is boolean value that shows the usage of regularization
         model.reg=regularization
         model.min_improvement=minImprovement
@@ -294,7 +295,7 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     cdef double probeErr=0.0, oldProbeErr=0.0
     cdef double min_improvement = model.min_improvement
     cdef char nflag = 0
-    if nmfflag:
+    if model.nmfflag:
         nflag = 1
     
     cdef np.ndarray U=model.u   
@@ -364,9 +365,9 @@ cdef double predict(int uOffset,int vOffset, \
         pred+=dataU[uOffset+k] * dataV[vOffset+k]
     return pred
 
- cdef double train(Rating *ratings, \
+cdef double train(Rating *ratings, \
                             double *dataU, double *dataV, \
-                            int factors, int n, double reg,double lr, nflag):
+                            int factors, int n, double reg,double lr, char nflag):
     """The inner loop of the factorization procedure.
 
     Iterate through the rating array: for each rating compute
