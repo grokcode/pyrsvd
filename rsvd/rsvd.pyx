@@ -10,6 +10,7 @@ import numpy as np
 import sys
 import pickle
 import getopt
+import simseq
 
 from time import time
 from os.path import exists
@@ -144,7 +145,8 @@ class RSVD(object):
     def train(cls,factors,ratingsArray,dims,probeArray=None,\
                   maxEpochs=100,minImprovement=0.000001,\
                   learnRate=0.001,regularization=0.011,\
-                  randomize=False, randomNoise=0.005, nmfflag=False):
+                  randomize=False, randomNoise=0.005, nmfflag=False,\
+                  gamma=0.2, simtx):
         """Factorizes the given partial rating matrix.
 
         train(factors,ratingsArray,dims,**kargs) -> RSVD
@@ -240,6 +242,9 @@ class RSVD(object):
         model.v=rs.uniform(\
             -randomNoise,randomNoise, model.num_users*model.factors)\
             .reshape(model.num_users,model.factors)+initVal
+
+        # receive a similarity matrix
+        model.simtx = simtx
         # finish the initialization by this line
         # start to training
         __trainModel(model,ratingsArray,probeArray,randomize=randomize)
@@ -282,8 +287,8 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     if probeArray is not None:
         early_stopping=True
     cdef int n=ratings.shape[0]
-    cdef int nMovies=model.num_movies
-    cdef int nUsers=model.num_users
+    cdef int nMovies=model.num_movies### number of movies
+    cdef int nUsers=model.num_users###
     cdef int i,k,epoch=0
     cdef int K=model.factors
     cdef int max_epochs=model.max_epochs
@@ -300,9 +305,12 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     
     cdef np.ndarray U=model.u   
     cdef np.ndarray V=model.v
+    cdef np.ndarray SIMTX=model.simtx
     
     cdef double *dataU=<double *>U.data
     cdef double *dataV=<double *>V.data
+
+    cdef double *simtx = <double *>SIMTX
     
         
     print("########################################")
@@ -333,7 +341,8 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
 
         # Calculate the dataU and dataV on this epoch
         trainErr=train(<Rating *>&(ratings[0]), dataU, \
-                            dataV, K,n, reg, lr, nflag)
+                            dataV, K,n, reg, lr, nflag,
+                            simtx, nMovies, gamma)
 
         if early_stopping:
             probeErr=probe(<Rating *>&(probeRatings[0]),dataU, \
@@ -365,16 +374,28 @@ cdef double predict(int uOffset,int vOffset, \
         pred+=dataU[uOffset+k] * dataV[vOffset+k]
     return pred
 
+
+cdef double simreg(double *dataU, int k, int factors, int movie, double *simtx, int nMovies):
+    """
+    Return: gradient value of the similarity based regularization.
+    """
+    cdef int j = 0
+    cdef double reg = 0.0
+    for j from 0 <= j < nMovies:
+        reg += math.exp(simtx[movie*factors + j]) *\
+               (dataU[movie*factors + k] - dataU[j * factors + k])
+
+
 cdef double train(Rating *ratings, \
                             double *dataU, double *dataV, \
-                            int factors, int n, double reg,double lr, char nflag):
+                            int factors, int n, double reg,double lr, char nflag, \
+                            double *simtx, int nMovies, double gamma):
     """The inner loop of the factorization procedure.
 
     Iterate through the rating array: for each rating compute
     the gradient with respect to the current parameters
     and update the movie and user factors, resp. 
         factors: K, the number of dimension of the u and v factors
-
     """
     cdef int k=0,i=0,uOffset=0,vOffset=0
     cdef int user=0
@@ -398,12 +419,14 @@ cdef double train(Rating *ratings, \
             uTemp = dataU[uOffset+k]
             vTemp = dataV[vOffset+k]
             if nflag:
-                dataU[uOffset+k] = max(0, dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp))
+                dataU[uOffset+k] = max(0, dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp
+                    - gamma*simreg(dataU, k, factors, movie, simtx, nMovies)))
                 dataV[vOffset+k] = max(0, dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp))
             else:
-                dataU[uOffset+k] += dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp)
-                dataV[vOffset+k] += dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp)
-    return np.sqrt(sumSqErr/n) 
+                dataU[uOffset+k] = dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp)
+                dataV[vOffset+k] = dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp)
+    return np.sqrt(sumSqErr/n)
+
 
 cdef double probe(Rating *probeRatings, double *dataU, \
                       double *dataV, int factors, int numRatings):
@@ -430,5 +453,3 @@ cdef double probe(Rating *probeRatings, double *dataU, \
         #if i % 1000000 == 0.0:
         #    print err*err, sumSqErr, numRatings, np.sqrt(sumSqErr/numRatings)
     return np.sqrt(sumSqErr/numRatings)
-
-

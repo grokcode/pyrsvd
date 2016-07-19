@@ -1,9 +1,11 @@
 
-CC = gcc
-LD = gcc
+CC = gcc-4.8
+LD = gcc-4.8
 CYTHON = cython
 
-CC_FLAGS = -shared -pthread -fPIC -fwrapv -O3 -Wall -fno-strict-aliasing -I/usr/include/python2.6
+NUMPY_PATH=/Users/takashi/.pyenv/versions/mac-2.7.9/lib/python2.7/site-packages/numpy/core/include
+
+CC_FLAGS = -shared -pthread -fPIC -fwrapv -O3 -Wall -fno-strict-aliasing -I$(NUMPY_PATH) -I/usr/include/python2.7
 LD_FLAGS = -o
 
 MODULE_SO = rsvd/rsvd.so
