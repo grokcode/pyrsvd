@@ -329,7 +329,7 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
 
     cdef double *simtx = <double *>SIMTX.data
     
-    
+
     print("########################################")
     print("             Factorizing                ")
     print("########################################")
@@ -373,13 +373,6 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
                 break
             oldProbeErr = probeErr
         print("%d\t%f\t%f\t%f"%(epoch,trainErr,probeErr,time()-t1))
-
-        # calc sequencial regularization value
-        seqreg = 0.
-        for reg_i from 0 <= reg_i < nMovies:
-            for reg_j from 0 <= reg_j < nMovies:
-                seqreg += simtx[movie*factors + reg_j] *\
-                   (dataU[movie*factors + k] - dataU[j * factors + k])
 
         """
         seqreg = 0.
