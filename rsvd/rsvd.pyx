@@ -10,15 +10,13 @@ import numpy as np
 import sys
 import pickle
 import getopt
-import simseq
-
+import math
 
 from time import time
 from os.path import exists
 
-# Author is differrent.
 __authors__ = [
-      '"Peter Prettenhofer" <peter.prettenhofer@gmail.com>'
+      '"Takashi Matsuda" <mazda.takasky@gmail.com>'
 ]
 
 """The numpy data type of a rating array, a (movieID,userID,rating) triple.
@@ -145,7 +143,7 @@ class RSVD(object):
 
     @classmethod
     def train(cls,factors,ratingsArray,dims,simtx, probeArray=None,\
-                  maxEpochs=100,minImprovement=0.000001,\
+                  esflag=True, maxEpochs=100,minImprovement=0.000001,\
                   learnRate=0.001,regularization=0.011,\
                   randomize=False, randomNoise=0.005, nmfflag=True,\
                   gamma=0., randseed=None):
@@ -158,9 +156,9 @@ class RSVD(object):
         set is smaller than `minImprovement`.
         If `probeArray` is None, `maxEpochs` are performed.
 
-	The complexity of the algorithm is O(n*k*m), where n is the number of
-	non-missing values in R (i.e. the size of the `ratingArray`), k is the
-	number of factors and m is the number of epochs to be performed. 
+    	The complexity of the algorithm is O(n*k*m), where n is the number of
+    	non-missing values in R (i.e. the size of the `ratingArray`), k is the
+	    number of factors and m is the number of epochs to be performed. 
 
         Parameters
         ----------
@@ -204,8 +202,7 @@ class RSVD(object):
         ----
         It is assumed, that the `ratingsArray` is proper shuffeld. 
         If the randomize flag is set the `ratingArray` is shuffeled every 10th
-        epoch. 
-
+        epoch.
         """
         model=RSVD() # make the instance of RSVD
         # set the num_movies, num_users that is the first and the second of dims
@@ -218,6 +215,7 @@ class RSVD(object):
         model.reg=regularization
         model.min_improvement=minImprovement
         model.max_epochs=maxEpochs
+        model.esflag=esflag
 
         # convert ratings to float64 due to numerical problems
         # when summing over a huge number of values 
@@ -237,7 +235,7 @@ class RSVD(object):
         # initilize by uniformally random variables
         if nmfflag:
             model.u=rs.uniform(\
-                0.,randomNoise, model.num_movies*model.factors)\
+                0.0001,randomNoise, model.num_movies*model.factors)\
                 .reshape(model.num_movies,model.factors)+initVal
 
         else:
@@ -249,7 +247,7 @@ class RSVD(object):
         # initilize by uniformally random variables
         if nmfflag:
             model.v=rs.uniform(\
-                0.,randomNoise, model.num_users*model.factors)\
+                0.0001,randomNoise, model.num_users*model.factors)\
                 .reshape(model.num_users,model.factors)+initVal
 
         else:
@@ -264,6 +262,32 @@ class RSVD(object):
         # start to training
         __trainModel(model,ratingsArray,probeArray,randomize=randomize)
         return model
+
+
+cdef double calcl2reg(double *dataU, double *dataV, int ulength, int vlength):
+    cdef double sumU = 0.
+    cdef double sumV = 0.
+    cdef int i = 0
+    for i from 0<= i < ulength:
+        sumU += (dataU[i])**2
+    i = 0
+    for i from 0<= i < vlength:
+        sumV += (dataV[i])**2
+    return sumU + sumV
+
+
+cdef double calcseqreg(double *dataU, double *simtx, int udim, int kdim):
+    cdef double sumseqreg = 0.
+    cdef int p = 0
+    cdef int q = 0
+    cdef double ksum = 0.
+    for p from 0<=p < udim:
+        for q from 0 <= q < udim:
+            ksum = 0.
+            for k from 0 <= k < kdim:
+                ksum += pow((dataU[p*kdim + k] - dataU[q*kdim + k]), 2)
+            sumseqreg = sumseqreg + (simtx[p*udim + q]) * ksum
+    return sumseqreg
 
 
 def __trainModel(model,ratingsArray,probeArray,randomize=False):
@@ -326,7 +350,8 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     
     cdef double *dataU=<double *>U.data
     cdef double *dataV=<double *>V.data
-
+    cdef int lenU=U.size
+    cdef int lenV=V.size
     cdef double *simtx = <double *>SIMTX.data
     
 
@@ -342,12 +367,10 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
         sys.stdout.flush()
 
     trainErr=probe(<Rating *>&(ratings[0]), dataU, dataV,K,n)
-    trainerrlist = []
-    seqreglist = []
 
     print("Init TRMSE: %f" % trainErr)
     print("----------------------------------------")
-    print("epoche\ttrain err\tprobe err\telapsed time")
+    print("epoche\ttrain_err\tprobe_err\ttrain_obj\tL2_reg\tseq_reg\tObj\telapsed_time")
     sys.stdout.flush()
     # This line is based on the old style of cython and pyrex
     # 'epoch' is the parameter representing the times svd ran
@@ -367,25 +390,24 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
         if early_stopping:
             probeErr=probe(<Rating *>&(probeRatings[0]),dataU, \
                                 dataV,K,probeRatings.shape[0])
-            if oldProbeErr-probeErr < min_improvement:
+            if model.esflag and oldProbeErr-probeErr < min_improvement:
                 print("Early stopping\nRelative improvement %f" \
                           % (oldProbeErr-probeErr))
                 break
             oldProbeErr = probeErr
-        print("%d\t%f\t%f\t%f"%(epoch,trainErr,probeErr,time()-t1))
 
-        """
-        seqreg = 0.
-        for reg_i in range(len(U.data)):
-            for reg_j in range(len(U.data)):
-                for reg_k in range(len(U.data[0]))
 
-            seqreg = seqreg + simtx[i,j]*
+        #trainErr, probeErr is RMSE
+        # probe() returns the true sum (err)^2
+        train_sumerr=probe(<Rating *>&(ratings[0]), dataU, dataV,K,n)
+        train_obj = (train_sumerr**2) * n
+ #       probe_sumerr = np.sqrt((probeErr **2)* probeRatings.shape[0])
+        l2reg = calcl2reg(dataU, dataV, lenU, lenV)
+        seqreg = calcseqreg(dataU, simtx, nMovies, K)
+        obj = train_obj + reg * l2reg + gamma * seqreg
+#        probeObj = probe_sumerr + reg * l2reg + gamma *seqreg
+        print("%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f"%(epoch,trainErr,probeErr, train_obj, reg *l2reg, gamma * seqreg, obj, time()-t1))
 
-        # record progress
-        trainerrlist.append(trainErr)
-        seqreglist.append(seqreg)
-        """
         sys.stdout.flush()
 
 # The Rating struct. 
@@ -398,7 +420,8 @@ cdef struct Rating:
 cdef double predict(int uOffset,int vOffset, \
                         double *dataU, double *dataV, \
                         int factors):
-    """Predict the rating of user i and movie j by first computing the
+    """
+    Predict the rating of user i and movie j by first computing the
     dot product of the user and movie factors. 
     """
     cdef double pred=0.0
@@ -424,12 +447,18 @@ cdef double simreg(double *dataU, int k, int factors, int movie, double *simtx, 
                (dataU[movie*factors + k] - dataU[j * factors + k])
 
     return reg
-"""
-def simreg_primitive(double *dataU, int k, int factors, int movie, double *simtx, int nMovies):
+
+
+cdef double simreg_primitive(double *dataU, int k, int factors, int movie, double *simtx, int nMovies):
+    """
+        not yet implemented
+    """
+    prim = 0.0
     for i in range(nMovies):
         for j in range(nMovies):
             prim += math.exp(simtx[i*factors + j])
-"""
+    return prim
+
 
 cdef double train(Rating *ratings, \
                             double *dataU, double *dataV, \
@@ -476,7 +505,6 @@ cdef double train(Rating *ratings, \
             """
             END: gradient test code
             """
-
             if nflag:
                 dataU[uOffset+k] = max(0., dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp
                     - gamma*simreg(dataU, k, factors, movie, simtx, nMovies)))
@@ -485,9 +513,8 @@ cdef double train(Rating *ratings, \
                 dataU[uOffset+k] = dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp
                     - gamma*simreg(dataU, k, factors, movie, simtx, nMovies))
                 dataV[vOffset+k] = dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp)
-    # Record the progress
 
-
+    # This is not same as RMSE
     return np.sqrt(sumSqErr/n)
 
 
