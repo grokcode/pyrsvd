@@ -10,12 +10,13 @@ import numpy as np
 import sys
 import pickle
 import getopt
+import math
 
 from time import time
 from os.path import exists
 
 __authors__ = [
-      '"Peter Prettenhofer" <peter.prettenhofer@gmail.com>'
+      '"Takashi Matsuda" <mazda.takasky@gmail.com>'
 ]
 
 """The numpy data type of a rating array, a (movieID,userID,rating) triple.
@@ -141,10 +142,11 @@ class RSVD(object):
         return r
 
     @classmethod
-    def train(cls,factors,ratingsArray,dims,probeArray=None,\
-                  maxEpochs=100,minImprovement=0.000001,\
+    def train(cls,factors,ratingsArray,dims,simtx, probeArray=None,\
+                  esflag=True, maxEpochs=100,minImprovement=0.000001,\
                   learnRate=0.001,regularization=0.011,\
-                  randomize=False, randomNoise=0.005):
+                  randomize=False, randomNoise=0.005, nmfflag=True,\
+                  gamma=0., randseed=None):
         """Factorizes the given partial rating matrix.
 
         train(factors,ratingsArray,dims,**kargs) -> RSVD
@@ -154,9 +156,9 @@ class RSVD(object):
         set is smaller than `minImprovement`.
         If `probeArray` is None, `maxEpochs` are performed.
 
-	The complexity of the algorithm is O(n*k*m), where n is the number of
-	non-missing values in R (i.e. the size of the `ratingArray`), k is the
-	number of factors and m is the number of epochs to be performed. 
+    	The complexity of the algorithm is O(n*k*m), where n is the number of
+    	non-missing values in R (i.e. the size of the `ratingArray`), k is the
+	    number of factors and m is the number of epochs to be performed. 
 
         Parameters
         ----------
@@ -188,6 +190,8 @@ class RSVD(object):
             It penalizes the magnitude of the parameters. (0.011)
         randomize : {True,False}
             Whether or not the ratingArray should be shuffeled. (False)
+        nmfflag : {True, False}
+            Whether or not the factors should be non-negative.
 
         Returns
         -------
@@ -198,17 +202,20 @@ class RSVD(object):
         ----
         It is assumed, that the `ratingsArray` is proper shuffeld. 
         If the randomize flag is set the `ratingArray` is shuffeled every 10th
-        epoch. 
-
+        epoch.
         """
-
-        model=RSVD()
+        model=RSVD() # make the instance of RSVD
+        # set the num_movies, num_users that is the first and the second of dims
         model.num_movies,model.num_users=dims
+
         model.factors=factors
         model.lr=learnRate
+        model.nmfflag = nmfflag
+        # reg is boolean value that shows the usage of regularization
         model.reg=regularization
         model.min_improvement=minImprovement
         model.max_epochs=maxEpochs
+        model.esflag=esflag
 
         # convert ratings to float64 due to numerical problems
         # when summing over a huge number of values 
@@ -218,23 +225,70 @@ class RSVD(object):
         model.min_rating=ratingsArray['f2'].min()
         model.max_rating=ratingsArray['f2'].max()
 
+        # initial value -- 
+        # TODO: is it suitable?
         initVal=np.sqrt(avgRating/factors)
 
-        rs=np.random.RandomState()
+        rs=np.random.RandomState(randseed)
         
         # define the movie factors U
-        model.u=rs.uniform(\
-            -randomNoise,randomNoise, model.num_movies*model.factors)\
-            .reshape(model.num_movies,model.factors)+initVal
+        # initilize by uniformally random variables
+        if nmfflag:
+            model.u=rs.uniform(\
+                0.0001,randomNoise, model.num_movies*model.factors)\
+                .reshape(model.num_movies,model.factors)+initVal
+
+        else:
+            model.u=rs.uniform(\
+                -randomNoise,randomNoise, model.num_movies*model.factors)\
+                .reshape(model.num_movies,model.factors)+initVal
         
         # define the user factors V
-        model.v=rs.uniform(\
-            -randomNoise,randomNoise, model.num_users*model.factors)\
-            .reshape(model.num_users,model.factors)+initVal
+        # initilize by uniformally random variables
+        if nmfflag:
+            model.v=rs.uniform(\
+                0.0001,randomNoise, model.num_users*model.factors)\
+                .reshape(model.num_users,model.factors)+initVal
 
-                
+        else:
+            model.v=rs.uniform(\
+                -randomNoise,randomNoise, model.num_users*model.factors)\
+                .reshape(model.num_users,model.factors)+initVal
+
+        # receive a similarity matrix
+        model.simtx = simtx
+        model.gamma = gamma
+        # finish the initialization by this line
+        # start to training
         __trainModel(model,ratingsArray,probeArray,randomize=randomize)
         return model
+
+
+cdef double calcl2reg(double *dataU, double *dataV, int ulength, int vlength):
+    cdef double sumU = 0.
+    cdef double sumV = 0.
+    cdef int i = 0
+    for i from 0<= i < ulength:
+        sumU += (dataU[i])**2
+    i = 0
+    for i from 0<= i < vlength:
+        sumV += (dataV[i])**2
+    return sumU + sumV
+
+
+cdef double calcseqreg(double *dataU, double *simtx, int udim, int kdim):
+    cdef double sumseqreg = 0.
+    cdef int p = 0
+    cdef int q = 0
+    cdef double ksum = 0.
+    for p from 0<=p < udim:
+        for q from 0 <= q < udim:
+            ksum = 0.
+            for k from 0 <= k < kdim:
+                ksum += pow((dataU[p*kdim + k] - dataU[q*kdim + k]), 2)
+            sumseqreg = sumseqreg + (simtx[p*udim + q]) * ksum
+    return sumseqreg
+
 
 def __trainModel(model,ratingsArray,probeArray,randomize=False):
     """Trains the model on the given rating data.
@@ -265,14 +319,15 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     * Shuffling may take a while.
     
     """
+    # redefine the parameters by the efficient representation on cython
     cdef object[Rating] ratings=ratingsArray
     early_stopping=False
     cdef object[Rating] probeRatings=probeArray
     if probeArray is not None:
         early_stopping=True
     cdef int n=ratings.shape[0]
-    cdef int nMovies=model.num_movies
-    cdef int nUsers=model.num_users
+    cdef int nMovies=model.num_movies### number of movies
+    cdef int nUsers=model.num_users###
     cdef int i,k,epoch=0
     cdef int K=model.factors
     cdef int max_epochs=model.max_epochs
@@ -283,18 +338,27 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
     cdef np.double_t reg=model.reg
     cdef double probeErr=0.0, oldProbeErr=0.0
     cdef double min_improvement = model.min_improvement
+    cdef char nflag = 0
+    if model.nmfflag:
+        nflag = 1
     
     cdef np.ndarray U=model.u   
     cdef np.ndarray V=model.v
+    cdef np.ndarray SIMTX=model.simtx
+
+    cdef double gamma = model.gamma
     
     cdef double *dataU=<double *>U.data
     cdef double *dataV=<double *>V.data
+    cdef int lenU=U.size
+    cdef int lenV=V.size
+    cdef double *simtx = <double *>SIMTX.data
     
-        
+
     print("########################################")
     print("             Factorizing                ")
     print("########################################")
-    print("factors=%d, epochs=%d, lr=%f, reg=%f, n=%d" % (K,max_epochs,lr,reg,n))
+    print("factors=%d, epochs=%d, lr=%f, reg=%f, n=%d, nmf=%d, gamma=%f" % (K,max_epochs,lr,reg,n,nflag,gamma))
     sys.stdout.flush()
     if early_stopping:
         oldProbeErr=probe(<Rating *>&(probeRatings[0]),\
@@ -303,10 +367,13 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
         sys.stdout.flush()
 
     trainErr=probe(<Rating *>&(ratings[0]), dataU, dataV,K,n)
+
     print("Init TRMSE: %f" % trainErr)
     print("----------------------------------------")
-    print("epoche\ttrain err\tprobe err\telapsed time")
+    print("epoche\ttrain_err\tprobe_err\ttrain_obj\tL2_reg\tseq_reg\tObj\telapsed_time")
     sys.stdout.flush()
+    # This line is based on the old style of cython and pyrex
+    # 'epoch' is the parameter representing the times svd ran
     for epoch from 0 <= epoch < max_epochs:
         t1=time()
         if randomize and epoch%10==0:
@@ -314,18 +381,33 @@ def __trainModel(model,ratingsArray,probeArray,randomize=False):
             sys.stdout.flush()
             np.random.shuffle(ratings)
             print("done")
+
+        # Calculate the dataU and dataV on this epoch
         trainErr=train(<Rating *>&(ratings[0]), dataU, \
-                            dataV, K,n, reg,lr)
+                            dataV, K,n, reg, lr, nflag,
+                            simtx, nMovies, gamma)
 
         if early_stopping:
             probeErr=probe(<Rating *>&(probeRatings[0]),dataU, \
                                 dataV,K,probeRatings.shape[0])
-            if oldProbeErr-probeErr < min_improvement:
+            if model.esflag and oldProbeErr-probeErr < min_improvement:
                 print("Early stopping\nRelative improvement %f" \
                           % (oldProbeErr-probeErr))
                 break
             oldProbeErr = probeErr
-        print("%d\t%f\t%f\t%f"%(epoch,trainErr,probeErr,time()-t1))
+
+
+        #trainErr, probeErr is RMSE
+        # probe() returns the true sum (err)^2
+        train_sumerr=probe(<Rating *>&(ratings[0]), dataU, dataV,K,n)
+        train_obj = (train_sumerr**2) * n
+ #       probe_sumerr = np.sqrt((probeErr **2)* probeRatings.shape[0])
+        l2reg = calcl2reg(dataU, dataV, lenU, lenV)
+        seqreg = calcseqreg(dataU, simtx, nMovies, K)
+        obj = train_obj + reg * l2reg + gamma * seqreg
+#        probeObj = probe_sumerr + reg * l2reg + gamma *seqreg
+        print("%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f"%(epoch,trainErr,probeErr, train_obj, reg *l2reg, gamma * seqreg, obj, time()-t1))
+
         sys.stdout.flush()
 
 # The Rating struct. 
@@ -338,7 +420,8 @@ cdef struct Rating:
 cdef double predict(int uOffset,int vOffset, \
                         double *dataU, double *dataV, \
                         int factors):
-    """Predict the rating of user i and movie j by first computing the
+    """
+    Predict the rating of user i and movie j by first computing the
     dot product of the user and movie factors. 
     """
     cdef double pred=0.0
@@ -347,35 +430,93 @@ cdef double predict(int uOffset,int vOffset, \
         pred+=dataU[uOffset+k] * dataV[vOffset+k]
     return pred
 
+
+cdef double simreg(double *dataU, int k, int factors, int movie, double *simtx, int nMovies):
+    """
+    Return: gradient value of the similarity based regularization.
+    """
+    cdef int j = 0
+    cdef double reg = 0.0
+    """
+    CAUTION:
+    Codes for exponential, and other regularization of simtx
+    moved into himf.py.
+    """
+    for j from 0 <= j < nMovies:
+        reg += simtx[movie*factors + j] *\
+               (dataU[movie*factors + k] - dataU[j * factors + k])
+
+    return reg
+
+
+cdef double simreg_primitive(double *dataU, int k, int factors, int movie, double *simtx, int nMovies):
+    """
+        not yet implemented
+    """
+    prim = 0.0
+    for i in range(nMovies):
+        for j in range(nMovies):
+            prim += math.exp(simtx[i*factors + j])
+    return prim
+
+
 cdef double train(Rating *ratings, \
                             double *dataU, double *dataV, \
-                            int factors, int n, double reg,double lr):
+                            int factors, int n, double reg,double lr, char nflag, \
+                            double *simtx, int nMovies, double gamma):
     """The inner loop of the factorization procedure.
 
     Iterate through the rating array: for each rating compute
     the gradient with respect to the current parameters
     and update the movie and user factors, resp. 
+        factors: K, the number of dimension of the u and v factors
     """
     cdef int k=0,i=0,uOffset=0,vOffset=0
     cdef int user=0
     cdef int movie=0
     cdef Rating r
     cdef double uTemp=0.0,vTemp=0.0,err=0.0,sumSqErr=0.0
+
     for i from 0<=i<n:
+        # calculate the error
         r=ratings[i]
         user=r.userID
         movie=r.movieID-1
-        uOffset=movie*factors
+        if movie < 0 or movie >= nMovies:
+            print "movie range error", movie, nMovies
+
+        uOffset=movie*factors #### debug point
         vOffset=user*factors
         err=<double>r.rating - \
             predict(uOffset,vOffset, dataU, dataV, factors)
         sumSqErr+=err*err;
+
+        # calculate the new U and V
         for k from 0<=k<factors:
             uTemp = dataU[uOffset+k]
             vTemp = dataV[vOffset+k]
-            dataU[uOffset+k]+=lr*(err*vTemp-reg*uTemp)
-            dataV[vOffset+k]+=lr*(err*uTemp-reg*vTemp)
+
+            """
+            BEGIN: gradient test code
+            """
+#            if k == 0:
+ #               print(simreg(dataU, k, factors, movie, simtx, nMovies))
+
+            """
+            END: gradient test code
+            """
+            if nflag:
+                dataU[uOffset+k] = max(0., dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp
+                    - gamma*simreg(dataU, k, factors, movie, simtx, nMovies)))
+                dataV[vOffset+k] = max(0., dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp))
+            else:
+                dataU[uOffset+k] = dataU[uOffset+k]+lr*(err*vTemp-reg*uTemp
+                    - gamma*simreg(dataU, k, factors, movie, simtx, nMovies))
+                dataV[vOffset+k] = dataV[vOffset+k]+lr*(err*uTemp-reg*vTemp)
+
+    # This is not same as RMSE
     return np.sqrt(sumSqErr/n)
+
 
 cdef double probe(Rating *probeRatings, double *dataU, \
                       double *dataV, int factors, int numRatings):
@@ -402,5 +543,3 @@ cdef double probe(Rating *probeRatings, double *dataU, \
         #if i % 1000000 == 0.0:
         #    print err*err, sumSqErr, numRatings, np.sqrt(sumSqErr/numRatings)
     return np.sqrt(sumSqErr/numRatings)
-
-
